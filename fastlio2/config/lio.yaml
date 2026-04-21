@@ -1,6 +1,7 @@
 imu_topic: /livox/imu_172_16_94_141
 lidar_topic: /livox/lidar_172_16_94_141
 body_frame: chassis/body
+lidar_frame: front_lidar
 world_frame: odom
 print_time_cost: false
 

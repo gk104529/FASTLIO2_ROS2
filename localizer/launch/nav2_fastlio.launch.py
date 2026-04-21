@@ -81,4 +81,10 @@ def generate_launch_description():
                 ]
             }]
         ),
+        Node(
+            package='nav2_waypoint_tools',
+            executable='pose_collector_node',
+            name='pose_collector_node',
+            output='screen'
+        ),
     ])

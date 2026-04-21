@@ -21,18 +21,13 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <yaml-cpp/yaml.h>
 
-#include <tf2_ros/buffer.h>
-#include <tf2_ros/transform_listener.h>
-#include <tf2_eigen/tf2_eigen.hpp>
-
 using namespace std::chrono_literals;
 struct NodeConfig
 {
     std::string imu_topic = "/livox/imu";
     std::string lidar_topic = "/livox/lidar";
     std::string body_frame = "body";
-    std::string lidar_frame = "front_lidar";
-    std::string world_frame = "world";
+    std::string world_frame = "lidar";
     bool print_time_cost = false;
 };
 struct StateData
@@ -63,9 +58,6 @@ public:
         m_path_pub = this->create_publisher<nav_msgs::msg::Path>("lio_path", 10000);
         m_odom_pub = this->create_publisher<nav_msgs::msg::Odometry>("lio_odom", 10000);
         m_tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
-
-        m_tf_buffer = std::make_shared<tf2_ros::Buffer>(this->get_clock());
-        m_tf_listener = std::make_shared<tf2_ros::TransformListener>(*m_tf_buffer);
 
         m_state_data.path.poses.clear();
         m_state_data.path.header.frame_id = m_node_config.world_frame;
@@ -187,65 +179,51 @@ public:
         pub->publish(cloud_msg);
     }
 
-    void publishOdometry(rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub,
-                        std::string frame_id, std::string child_frame, const double &time)
+    void publishOdometry(rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub, std::string frame_id, std::string child_frame, const double &time)
     {
         if (odom_pub->get_subscription_count() <= 0)
             return;
-
-        Eigen::Matrix3d R_wb;
-        Eigen::Vector3d t_wb;
-        if (!getWorldToBody(R_wb, t_wb, time))
-            return;
-
         nav_msgs::msg::Odometry odom;
         odom.header.frame_id = frame_id;
         odom.header.stamp = Utils::getTime(time);
         odom.child_frame_id = child_frame;
+        odom.pose.pose.position.x = m_kf->x().t_wi.x();
+        odom.pose.pose.position.y = m_kf->x().t_wi.y();
+        odom.pose.pose.position.z = m_kf->x().t_wi.z();
+        //Eigen::Quaterniond q(m_kf->x().r_wi);
+        Eigen::Matrix3d R_wi_level = makeLeveledRotation(m_kf->x().r_wi);
+        Eigen::Quaterniond q(R_wi_level);
 
-        odom.pose.pose.position.x = t_wb.x();
-        odom.pose.pose.position.y = t_wb.y();
-        odom.pose.pose.position.z = t_wb.z();
-
-        Eigen::Quaterniond q(R_wb);
         odom.pose.pose.orientation.x = q.x();
         odom.pose.pose.orientation.y = q.y();
         odom.pose.pose.orientation.z = q.z();
         odom.pose.pose.orientation.w = q.w();
 
-        V3D vel = R_wb.transpose() * m_kf->x().v;
+        V3D vel = m_kf->x().r_wi.transpose() * m_kf->x().v;
         odom.twist.twist.linear.x = vel.x();
         odom.twist.twist.linear.y = vel.y();
         odom.twist.twist.linear.z = vel.z();
-
         odom_pub->publish(odom);
     }
 
-    void publishPath(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub,
-                    std::string frame_id, const double &time)
+    void publishPath(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub, std::string frame_id, const double &time)
     {
         if (path_pub->get_subscription_count() <= 0)
             return;
-
-        Eigen::Matrix3d R_wb;
-        Eigen::Vector3d t_wb;
-        if (!getWorldToBody(R_wb, t_wb, time))
-            return;
-
         geometry_msgs::msg::PoseStamped pose;
         pose.header.frame_id = frame_id;
         pose.header.stamp = Utils::getTime(time);
+        pose.pose.position.x = m_kf->x().t_wi.x();
+        pose.pose.position.y = m_kf->x().t_wi.y();
+        pose.pose.position.z = m_kf->x().t_wi.z();
+        //Eigen::Quaterniond q(m_kf->x().r_wi);
+        Eigen::Matrix3d R_wi_level = makeLeveledRotation(m_kf->x().r_wi);
+        Eigen::Quaterniond q(R_wi_level);
 
-        pose.pose.position.x = t_wb.x();
-        pose.pose.position.y = t_wb.y();
-        pose.pose.position.z = t_wb.z();
-
-        Eigen::Quaterniond q(R_wb);
         pose.pose.orientation.x = q.x();
         pose.pose.orientation.y = q.y();
         pose.pose.orientation.z = q.z();
         pose.pose.orientation.w = q.w();
-
         m_state_data.path.poses.push_back(pose);
         path_pub->publish(m_state_data.path);
     }
@@ -253,20 +231,18 @@ public:
     void broadCastTF(std::shared_ptr<tf2_ros::TransformBroadcaster> broad_caster,
                     std::string frame_id, std::string child_frame, const double &time)
     {
-        Eigen::Matrix3d R_wb;
-        Eigen::Vector3d t_wb;
-        if (!getWorldToBody(R_wb, t_wb, time))
-            return;
-
         geometry_msgs::msg::TransformStamped transformStamped;
         transformStamped.header.frame_id = frame_id;
         transformStamped.child_frame_id = child_frame;
         transformStamped.header.stamp = Utils::getTime(time);
 
-        Eigen::Quaterniond q(R_wb);
-        transformStamped.transform.translation.x = t_wb.x();
-        transformStamped.transform.translation.y = t_wb.y();
-        transformStamped.transform.translation.z = t_wb.z();
+        Eigen::Matrix3d R_wi_level = makeLeveledRotation(m_kf->x().r_wi);
+        Eigen::Quaterniond q(R_wi_level);
+
+        V3D t = m_kf->x().t_wi;
+        transformStamped.transform.translation.x = t.x();
+        transformStamped.transform.translation.y = t.y();
+        transformStamped.transform.translation.z = t.z();
         transformStamped.transform.rotation.x = q.x();
         transformStamped.transform.rotation.y = q.y();
         transformStamped.transform.rotation.z = q.z();
@@ -298,7 +274,7 @@ public:
 
         CloudType::Ptr body_cloud = m_builder->lidar_processor()->transformCloud(m_package.cloud, m_kf->x().r_il, m_kf->x().t_il);
 
-        publishCloud(m_body_cloud_pub, body_cloud, m_node_config.lidar_frame, m_package.cloud_end_time);
+        publishCloud(m_body_cloud_pub, body_cloud, m_node_config.body_frame, m_package.cloud_end_time);
 
         CloudType::Ptr world_cloud = m_builder->lidar_processor()->transformCloud(m_package.cloud, m_builder->lidar_processor()->r_wl(), m_builder->lidar_processor()->t_wl());
 
@@ -307,41 +283,33 @@ public:
         publishPath(m_path_pub, m_node_config.world_frame, m_package.cloud_end_time);
     }
 
-    bool getWorldToBody(Eigen::Matrix3d& R_wb, Eigen::Vector3d& t_wb, const double& time)
+    Eigen::Matrix3d makeLeveledRotation(const Eigen::Matrix3d& R_wi)
     {
-        // 現在の推定値は world -> lidar とみなす
-        Eigen::Matrix3d R_wl = m_kf->x().r_wi;
-        Eigen::Vector3d t_wl = m_kf->x().t_wi;
+        // world系の鉛直軸
+        Eigen::Vector3d z_w(0.0, 0.0, 1.0);
 
-        geometry_msgs::msg::TransformStamped tf_lidar_to_body;
-        try
-        {
-            tf_lidar_to_body = m_tf_buffer->lookupTransform(
-                m_node_config.lidar_frame,
-                m_node_config.body_frame,
-                tf2::TimePointZero);
-        }
-        catch (const tf2::TransformException& ex)
-        {
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 2000,
-                "Failed to lookup TF %s -> %s: %s",
-                m_node_config.lidar_frame.c_str(),
-                m_node_config.body_frame.c_str(),
-                ex.what());
-            return false;
+        // body x軸をworld系で見たベクトル
+        Eigen::Vector3d x_w = R_wi.col(0);
+
+        // 水平成分だけ取り出す -> yaw方向
+        Eigen::Vector3d x_level = x_w - x_w.dot(z_w) * z_w;
+
+        // 特異ケース対策
+        if (x_level.norm() < 1e-6) {
+            x_level = Eigen::Vector3d(1.0, 0.0, 0.0);
+        } else {
+            x_level.normalize();
         }
 
-        Eigen::Affine3d T_lb = tf2::transformToEigen(tf_lidar_to_body.transform);
+        // 右手系を作る
+        Eigen::Vector3d y_level = z_w.cross(x_level).normalized();
 
-        Eigen::Matrix3d R_lb = T_lb.rotation();
-        Eigen::Vector3d t_lb = T_lb.translation();
+        Eigen::Matrix3d R_level;
+        R_level.col(0) = x_level;
+        R_level.col(1) = y_level;
+        R_level.col(2) = z_w;
 
-        // world -> body = world -> lidar * lidar -> body
-        R_wb = R_wl * R_lb;
-        t_wb = t_wl + R_wl * t_lb;
-
-        return true;
+        return R_level;
     }
 
 private:
@@ -361,9 +329,6 @@ private:
     std::shared_ptr<IESKF> m_kf;
     std::shared_ptr<MapBuilder> m_builder;
     std::shared_ptr<tf2_ros::TransformBroadcaster> m_tf_broadcaster;
-
-    std::shared_ptr<tf2_ros::Buffer> m_tf_buffer;
-    std::shared_ptr<tf2_ros::TransformListener> m_tf_listener;
 };
 
 int main(int argc, char **argv)
