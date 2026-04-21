@@ -26,6 +26,7 @@ struct NodeConfig {
   std::string odom_topic = "/fastlio2/lio_odom";
   std::string map_frame = "map";
   std::string local_frame = "lidar";
+  std::string base_frame = "base_link";
   std::string initialpose_topic = "/initialpose";
   std::string map_pcd_path = "";
   bool auto_load_map = true;
@@ -154,6 +155,11 @@ public:
         m_config.odom_topic = config["odom_topic"].as<std::string>();
         m_config.map_frame = config["map_frame"].as<std::string>();
         m_config.local_frame = config["local_frame"].as<std::string>();
+
+        if (config["base_frame"]) {
+            m_config.base_frame = config["base_frame"].as<std::string>();
+        }
+
         m_config.update_hz = config["update_hz"].as<double>();
 
         if (config["tf_hz"]) {
@@ -182,16 +188,19 @@ public:
 
         pcl::fromROSMsg(*cloud_msg, *m_state.last_cloud);
 
+        // odom_msg->pose.pose は
+        //   odom_msg->header.frame_id  ->  odom_msg->child_frame_id
+        // の姿勢
         m_state.last_r =
             Eigen::Quaterniond(odom_msg->pose.pose.orientation.w,
-                               odom_msg->pose.pose.orientation.x,
-                               odom_msg->pose.pose.orientation.y,
-                               odom_msg->pose.pose.orientation.z)
+                            odom_msg->pose.pose.orientation.x,
+                            odom_msg->pose.pose.orientation.y,
+                            odom_msg->pose.pose.orientation.z)
                 .toRotationMatrix();
 
         m_state.last_t = V3D(odom_msg->pose.pose.position.x,
-                             odom_msg->pose.pose.position.y,
-                             odom_msg->pose.pose.position.z);
+                            odom_msg->pose.pose.position.y,
+                            odom_msg->pose.pose.position.z);
 
         m_state.last_message_time = cloud_msg->header.stamp;
 
@@ -449,26 +458,50 @@ public:
             RCLCPP_INFO(this->get_logger(), "Loaded map from: %s", m_config.map_pcd_path.c_str());
         }
 
+        // RVizの /initialpose は map -> base_frame として解釈する
         const auto &p = msg->pose.pose.position;
         const auto &q = msg->pose.pose.orientation;
 
-        Eigen::Quaterniond quat(q.w, q.x, q.y, q.z);
-        Eigen::Matrix3d rot = quat.toRotationMatrix();
+        M3D map_base_r = Eigen::Quaterniond(q.w, q.x, q.y, q.z).toRotationMatrix();
+        V3D map_base_t(p.x, p.y, p.z);
+
+        // 現在の odom(local_frame) -> base_frame(child_frame_id想定) を取得
+        M3D local_base_r;
+        V3D local_base_t;
+
+        {
+            std::lock_guard<std::mutex> lock(m_state.message_mutex);
+            if (!m_state.message_received) {
+                RCLCPP_WARN(this->get_logger(),
+                            "No odom received yet. Cannot convert map->%s to map->%s.",
+                            m_config.base_frame.c_str(),
+                            m_config.local_frame.c_str());
+                return;
+            }
+
+            local_base_r = m_state.last_r;
+            local_base_t = m_state.last_t;
+        }
+
+        // 変換:
+        // map->local = map->base * inv(local->base)
+        M3D map_local_r = map_base_r * local_base_r.transpose();
+        V3D map_local_t = map_base_t - map_local_r * local_base_t;
 
         {
             std::lock_guard<std::mutex> lock(m_state.service_mutex);
             m_state.initial_guess.setIdentity();
-            m_state.initial_guess.block<3, 3>(0, 0) = rot.cast<float>();
-            m_state.initial_guess(0, 3) = static_cast<float>(p.x);
-            m_state.initial_guess(1, 3) = static_cast<float>(p.y);
-            m_state.initial_guess(2, 3) = static_cast<float>(p.z);
+            m_state.initial_guess.block<3, 3>(0, 0) = map_local_r.cast<float>();
+            m_state.initial_guess.block<3, 1>(0, 3) = map_local_t.cast<float>();
             m_state.service_received = true;
             m_state.localize_success = false;
         }
 
         RCLCPP_INFO(this->get_logger(),
-                    "Received /initialpose: x=%.3f y=%.3f z=%.3f",
-                    p.x, p.y, p.z);
+                    "Received /initialpose as map->%s, converted to map->%s: x=%.3f y=%.3f z=%.3f",
+                    m_config.base_frame.c_str(),
+                    m_config.local_frame.c_str(),
+                    map_local_t.x(), map_local_t.y(), map_local_t.z());
     }
 
 private:

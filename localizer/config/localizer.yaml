@@ -2,6 +2,7 @@ cloud_topic: /fastlio2/body_cloud
 odom_topic: /fastlio2/lio_odom
 map_frame: map
 local_frame: odom
+base_frame: "chassis/body"
 update_hz: 5.0
 tf_hz: 30.0
 
