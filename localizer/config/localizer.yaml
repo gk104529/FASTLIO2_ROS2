@@ -1,8 +1,9 @@
 cloud_topic: /fastlio2/body_cloud
 odom_topic: /fastlio2/lio_odom
 map_frame: map
-local_frame: lidar
-update_hz: 1.0
+local_frame: odom
+update_hz: 5.0
+tf_hz: 30.0
 
 rough_scan_resolution: 0.25
 rough_map_resolution: 0.25
@@ -13,3 +14,8 @@ refine_scan_resolution: 0.1
 refine_map_resolution: 0.1
 refine_max_iteration: 10
 refine_score_thresh: 0.1
+
+
+initialpose_topic: /initialpose
+map_pcd_path: /media/data/download/map.pcd
+auto_load_map: true
